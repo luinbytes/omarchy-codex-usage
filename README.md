@@ -14,10 +14,8 @@ No installer, background service, `sudo`, or additional package is required.
 
 ## Install
 
-Replace `YOUR_ACCOUNT` with the GitHub account or organization hosting this repository:
-
 ```sh
-omarchy plugin add https://github.com/YOUR_ACCOUNT/omarchy-codex-usage.git --enable
+omarchy plugin add https://github.com/luinbytes/omarchy-codex-usage.git --enable
 ```
 
 The widget is added to the right section of the bar. Move it if preferred:
