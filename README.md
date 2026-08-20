@@ -4,6 +4,14 @@ A small Omarchy Quattro bar widget that shows remaining Codex weekly usage. Hove
 
 The widget asks the locally installed Codex app server for `account/rateLimits/read`. It does not read or print authentication tokens.
 
+## Preview
+
+![Codex usage details popup](preview.png)
+
+Compact bar widget:
+
+![Codex usage bar widget](bar-widget.png)
+
 ## Requirements
 
 - Omarchy 4 with the Quattro shell
