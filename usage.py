@@ -1,17 +1,24 @@
 #!/usr/bin/env python3
-"""Codex usage data for the Omarchy Shell widget."""
+"""Codex and Cursor/Grok usage for the Omarchy Shell widget."""
 
 import json
 import math
 import os
 import queue
+import shutil
 import subprocess
-import sys
 import threading
+from concurrent.futures import ThreadPoolExecutor
+import sqlite3
+import sys
 import time
+import urllib.error
+import urllib.request
 from datetime import UTC, datetime
+from pathlib import Path
 
 APP_NAME = "codex-quickshell-usage"
+CURSOR_USAGE_URL = "https://api2.cursor.sh/aiserver.v1.DashboardService/GetCurrentPeriodUsage"
 
 
 def env_int(name, default, minimum=0, maximum=10_000):
@@ -117,7 +124,13 @@ def pace(window, used, now):
 
 def request_rate_limits(timeout=None):
     timeout = timeout or env_int("CODEX_QUICKSHELL_TIMEOUT", 12, 1, 60)
-    codex = os.environ.get("CODEX_BIN", "codex")
+    codex = os.environ.get("CODEX_BIN") or shutil.which("codex")
+    if not codex:
+        bundled = Path("/usr/lib/chatgpt/resources/codex")
+        if bundled.is_file() and os.access(bundled, os.X_OK):
+            codex = str(bundled)
+        else:
+            raise RuntimeError("Codex executable not found; set CODEX_BIN")
     process = subprocess.Popen(
         [codex, "app-server", "--stdio"],
         stdin=subprocess.PIPE,
@@ -173,6 +186,68 @@ def request_rate_limits(timeout=None):
             process.wait(timeout=2)
         except subprocess.TimeoutExpired:
             process.kill()
+
+
+def cursor_access_token():
+    config = Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config"))
+    database = config / "Cursor/User/globalStorage/state.vscdb"
+    connection = sqlite3.connect(database.resolve().as_uri() + "?mode=ro", uri=True)
+    try:
+        row = connection.execute(
+            "SELECT value FROM ItemTable WHERE key = 'cursorAuth/accessToken'"
+        ).fetchone()
+    finally:
+        connection.close()
+    if not row or not str(row[0]).strip():
+        raise RuntimeError("Cursor is not signed in")
+    return str(row[0])
+
+
+def request_cursor_usage(timeout=None):
+    timeout = timeout or env_int("GROK_USAGE_TIMEOUT", 12, 1, 60)
+    request = urllib.request.Request(
+        CURSOR_USAGE_URL,
+        data=b"{}",
+        headers={
+            "Authorization": f"Bearer {cursor_access_token()}",
+            "Content-Type": "application/json",
+            "Connect-Protocol-Version": "1",
+        },
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            payload = json.loads(response.read().decode())
+    except urllib.error.URLError as error:
+        raise RuntimeError("Cursor usage did not respond") from error
+    if not isinstance(payload, dict):
+        raise RuntimeError("Cursor usage response was not an object")
+    return payload
+
+
+def epoch_seconds(value):
+    value = number(value)
+    if value is None:
+        return None
+    return value / 1000 if value > 1e12 else value
+
+
+def windows_from_cursor(payload):
+    plan = payload.get("planUsage") if isinstance(payload, dict) else None
+    if not isinstance(plan, dict):
+        return []
+    used = percent(plan.get("totalPercentUsed"))
+    start = epoch_seconds(payload.get("billingCycleStart"))
+    end = epoch_seconds(payload.get("billingCycleEnd"))
+    if used is None or start is None or end is None or end <= start:
+        return []
+    windows = [
+        {
+            "used_percent": used,
+            "limit_window_seconds": end - start,
+            "reset_at": end,
+        }
+    ]
+    return windows
 
 
 def normalize_windows(result):
@@ -237,6 +312,8 @@ def derive_state(windows, now=None):
         "session_used": None
         if session is None
         else percent(session.get("used_percent")),
+        "weekly_reset_at": number(weekly.get("reset_at")),
+        "session_reset_at": None if session is None else number(session.get("reset_at")),
         "reset": f"{relative}  ·  {datetime.fromtimestamp(reset, UTC).astimezone().strftime('%a %H:%M')}",
     }
 
@@ -249,6 +326,8 @@ def quickshell_output(windows, now=None):
         "available": True,
         "remaining": 100 - percent(state["used"]),
         "session_used": state["session_used"],
+        "weekly_reset_at": state["weekly_reset_at"],
+        "session_reset_at": state["session_reset_at"],
         "used": state["used"],
         "status": state["status"],
         "glyph": state["glyph"],
@@ -313,16 +392,56 @@ def self_test():
     assert len(segments) == 7 and segments[0][2] == 0.17 and segments[3][2] == 0.13
     assert segments[4][2] is None
     assert rounded(0.5) == 1 and rounded(-0.5) == -1
+    from contextlib import redirect_stderr
+    from io import StringIO
+    from unittest.mock import patch
+
+    cursor_payload = {
+        "planUsage": {"totalPercentUsed": 81, "apiPercentUsed": 20},
+        "billingCycleStart": 1700000000000,
+        "billingCycleEnd": 1702592000000,
+    }
+    cursor_windows = windows_from_cursor(cursor_payload)
+    assert len(cursor_windows) == 1
+    assert quickshell_output(cursor_windows)["session_used"] is None
+    assert windows_from_cursor({}) == []
+    with patch(__name__ + ".request_rate_limits", return_value=payload), patch(
+        __name__ + ".request_cursor_usage", return_value=cursor_payload
+    ):
+        output = fetch_usage()
+        assert output["remaining"] == 85 and output["grok"]["remaining"] == 19
+    with redirect_stderr(StringIO()), patch(
+        __name__ + ".request_rate_limits", side_effect=TimeoutError("unavailable")
+    ), patch(__name__ + ".request_cursor_usage", return_value=cursor_payload):
+        output = fetch_usage()
+        assert not output["available"] and output["grok"]["remaining"] == 19
+    with redirect_stderr(StringIO()), patch(
+        __name__ + ".request_rate_limits", return_value=payload
+    ), patch(__name__ + ".request_cursor_usage", side_effect=sqlite3.OperationalError("unavailable")):
+        output = fetch_usage()
+        assert output["remaining"] == 85 and not output["grok"]["available"]
     print(f"{APP_NAME} self-test: ok")
+
+
+def fetch_provider(provider):
+    try:
+        windows = (fetch_windows() if provider == "codex"
+                   else windows_from_cursor(request_cursor_usage()))
+        return quickshell_output(windows)
+    except (OSError, RuntimeError, ValueError, KeyError, TypeError, sqlite3.Error) as error:
+        print(f"{APP_NAME}: {provider} refresh failed ({type(error).__name__})", file=sys.stderr)
+        return quickshell_output([])
+
+
+def fetch_usage():
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        codex = executor.submit(fetch_provider, "codex")
+        grok = executor.submit(fetch_provider, "grok")
+        return {**codex.result(), "grok": grok.result()}
 
 
 if __name__ == "__main__":
     if "--self-test" in sys.argv:
         self_test()
     else:
-        try:
-            print(json.dumps(quickshell_output(fetch_windows())))
-        except (OSError, RuntimeError, ValueError, KeyError, TypeError) as error:
-            print(f"{APP_NAME}: {error}", file=sys.stderr)
-            print(json.dumps(quickshell_output([])))
-
+        print(json.dumps(fetch_usage()))
