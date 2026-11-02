@@ -1,20 +1,22 @@
 {
   "schemaVersion": 1,
   "id": "community.codex-usage",
-  "name": "Codex Usage",
-  "version": "1.0.0",
+  "name": "Codex & Grok Usage",
+  "version": "1.1.0",
   "author": "Codex Usage Contributors",
-  "license": "MIT",
-  "description": "Codex session and weekly usage, pace, and reset time in the Omarchy bar.",
-  "kinds": ["bar-widget"],
+  "description": "Codex session and weekly usage, with Cursor/Grok usage below",
+  "kinds": [
+    "bar-widget"
+  ],
   "entryPoints": {
-    "barWidget": "BarWidget.qml"
+    "barWidget": "Panel.qml"
   },
   "barWidget": {
-    "displayName": "Codex Usage",
-    "description": "Codex session and weekly usage, pace, and reset time.",
+    "displayName": "Codex & Grok Usage",
+    "description": "Codex session and weekly usage, with Cursor/Grok usage below",
     "category": "System",
     "allowMultiple": false,
     "defaultSection": "right"
-  }
+  },
+  "license": "MIT"
 }
